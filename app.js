@@ -149,12 +149,34 @@
     for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
     save(); renderSetup(); toast(`선 플레이어: ${a[0].name}`);
   });
-  document.querySelectorAll('#timeChips button').forEach((b) => b.addEventListener('click', () => {
-    state.settings.turnSeconds = +b.dataset.sec; save(); renderSetup();
-    if (state.game && !state.game.running) { state.game.remaining = state.settings.turnSeconds; save(); }
-  }));
   const clampNum = (v, min, max, fallback) => { v = Number(v); return Number.isFinite(v) ? Math.min(max, Math.max(min, Math.round(v))) : fallback; };
-  [['turnSeconds', 10, 600], ['warnSeconds', 0, 60], ['penaltyDraw', 0, 5], ['startHand', 1, 20]].forEach(([k, min, max]) => {
+
+  // 턴 시간 변경 — 게임 중에도 가능. 진행 중인 턴은 이미 쓴 시간을 유지한 채 새 시간으로 바뀜
+  const setTurnSeconds = (sec) => {
+    sec = clampNum(sec, 10, 600, state.settings.turnSeconds);
+    const old = state.settings.turnSeconds;
+    if (sec === old) return;
+    const g = state.game;
+    const elapsed = g ? Math.max(0, old - remainingNow()) : 0;
+    state.settings.turnSeconds = sec;
+    if (g) {
+      if (g.timedOut || remainingNow() <= 0) g.remaining = sec;
+      else {
+        const left = Math.max(1, sec - elapsed);
+        if (g.running) g.endsAt = Date.now() + left * 1000;
+        else g.remaining = left;
+      }
+      lastWholeSec = null;
+    }
+    save(); render();
+    if (g) toast(`턴 시간 ${sec}초로 변경`);
+  };
+
+  document.querySelectorAll('#timeChips button, #gameTimeChips button').forEach((b) => b.addEventListener('click', () => setTurnSeconds(+b.dataset.sec)));
+  $('#ttMinus').addEventListener('click', () => setTurnSeconds(state.settings.turnSeconds - 10));
+  $('#ttPlus').addEventListener('click', () => setTurnSeconds(state.settings.turnSeconds + 10));
+  $('#turnSeconds').addEventListener('change', (e) => { setTurnSeconds(e.target.value); renderSetup(); });
+  [['warnSeconds', 0, 60], ['penaltyDraw', 0, 5], ['startHand', 1, 20]].forEach(([k, min, max]) => {
     $('#' + k).addEventListener('change', (e) => {
       state.settings[k] = clampNum(e.target.value, min, max, state.settings[k]);
       save(); renderSetup();
@@ -351,7 +373,12 @@
     $('#roundTag').textContent = `라운드 ${g.round} · 턴 ${g.turnNo}`;
     $('#currentName').replaceChildren(el('span', { class: 'dot', style: `background:${cur.color}` }), cur.name);
     $('#nextName').textContent = `다음: ${nxt.name}`;
-    $('#pauseBtn').textContent = g.running ? '⏸ 일시정지' : (g.remaining < state.settings.turnSeconds && g.remaining > 0 ? '▶ 재개' : '▶ 시작');
+    $('#pauseBtn').textContent = g.running ? '⏸ 멈춤' : (g.remaining < state.settings.turnSeconds && g.remaining > 0 ? '▶ 재개' : '▶ 시작');
+    const ts = state.settings.turnSeconds;
+    $('#ttValue').textContent = `${ts}초`;
+    $('#ttMinus').disabled = ts <= 10;
+    $('#ttPlus').disabled = ts >= 600;
+    document.querySelectorAll('#gameTimeChips button').forEach((b) => b.classList.toggle('on', +b.dataset.sec === ts));
     $('#undoBtn').disabled = !g.history.length;
     $('#placeCount').textContent = state.placeCount;
     $('#drawBtn').textContent = g.pool > 0 ? '드로우 후 턴 종료 (+1)' : '풀이 비었어요 — 패스';

@@ -80,6 +80,19 @@
           <div class="time" id="timeText">60</div>
         </div>
 
+        <div class="turn-time" aria-label="턴 시간 변경">
+          <span class="tt-label">턴 시간</span>
+          <button id="ttMinus" class="tt-step" aria-label="턴 시간 10초 줄이기">−10</button>
+          <b id="ttValue">60초</b>
+          <button id="ttPlus" class="tt-step" aria-label="턴 시간 10초 늘리기">+10</button>
+          <div class="chips" id="gameTimeChips">
+            <button data-sec="30">30</button>
+            <button data-sec="60">60</button>
+            <button data-sec="90">90</button>
+            <button data-sec="120">120</button>
+          </div>
+        </div>
+
         <div class="controls">
           <button id="pauseBtn" class="btn">⏯ 시작</button>
           <button id="resetTimerBtn" class="btn ghost">↺ 리셋</button>
