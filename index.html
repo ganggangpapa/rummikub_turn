@@ -111,6 +111,37 @@
           </div>
         </div>
 
+        <div class="card" id="tableCard">
+          <h3>테이블 기록 <small id="tableSummary"></small></h3>
+          <p class="hint table-hint">내려놓은 큐브를 체크해 두면, 조합이 꼬였을 때 턴 시작 상태를 보고 되돌릴 수 있어요.</p>
+          <div id="tableSets" class="table-sets"></div>
+
+          <div id="selBar" class="sel-bar" hidden>
+            <span><b id="selCount">0</b>장 선택 · 옮길 세트를 탭하세요</span>
+            <div class="row">
+              <button id="selNewSet" class="btn ghost">새 세트로</button>
+              <button id="selRemove" class="btn ghost">테이블에서 빼기</button>
+              <button id="selCancel" class="btn ghost">선택 취소</button>
+            </div>
+          </div>
+
+          <div id="picker" class="picker" hidden>
+            <div class="picker-head">
+              <b id="pickerTarget">새 세트에 추가</b>
+              <button id="newSetBtn" class="btn ghost">＋ 새 세트</button>
+            </div>
+            <div id="pickerGrid"></div>
+            <p class="hint">위 세트를 탭하면 그 세트에 추가돼요. 같은 큐브는 2장까지 고를 수 있어요.</p>
+          </div>
+
+          <div class="row">
+            <button id="addTilesBtn" class="btn primary">＋ 큐브 추가</button>
+            <button id="revertTableBtn" class="btn ghost">↺ 턴 시작 상태로</button>
+            <button id="prevTableBtn" class="btn ghost">👁 턴 시작 테이블</button>
+          </div>
+          <div id="prevTable" class="prev-table" hidden></div>
+        </div>
+
         <div class="card">
           <h3>큐브 표시판 <small>(남은 손패 · 풀 <b id="poolCount">0</b>장)</small></h3>
           <ul id="cubeBoard" class="cube-board"></ul>
