@@ -131,6 +131,17 @@ main { max-width: 720px; margin: 0 auto; padding: 12px 16px; }
 @keyframes pulse { 50% { opacity: .45; } }
 .paused-badge { position: absolute; top: 0; left: 50%; transform: translateX(-50%); font-size: .8rem; color: var(--muted); }
 
+.turn-time {
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px 8px;
+  margin: -4px 0 12px; font-size: .9rem;
+}
+.turn-time .tt-label { color: var(--muted); }
+.turn-time b { min-width: 3.5ch; text-align: center; font-variant-numeric: tabular-nums; }
+.tt-step { border: 1px solid var(--line); background: transparent; border-radius: 999px; padding: 4px 10px; font-size: .85rem; }
+.tt-step:disabled { opacity: .4; }
+.turn-time .chips { margin: 0; }
+.turn-time .chips button { padding: 4px 10px; font-size: .85rem; }
+
 .controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
 .end-turn { display: grid; gap: 10px; margin-bottom: 14px; }
 .place-box { display: grid; grid-template-columns: auto 1fr; gap: 8px; }

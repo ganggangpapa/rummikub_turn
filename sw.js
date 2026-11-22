@@ -1,5 +1,5 @@
 /* 오프라인 지원용 서비스 워커. 파일을 수정하면 CACHE 버전을 올려주세요. */
-const CACHE = 'rummikub-turn-v1';
+const CACHE = 'rummikub-turn-v2';
 const ASSETS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
