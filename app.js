@@ -210,6 +210,8 @@
       log: prevLog,
       history: [],
       timedOut: false,
+      table: [],            // 테이블 위 세트들: [[{c, n}, ...], ...]
+      tableAtTurnStart: [], // 이번 턴이 시작될 때의 테이블 (되돌리기 기준)
     };
     save();
   };
@@ -291,8 +293,11 @@
     buzz([200, 100, 300]);
     const p = player(g.order[g.current]);
     const pen = state.settings.penaltyDraw;
+    // 공식 규칙: 시간 초과 시 테이블을 턴 시작 상태로 돌려놓고 패널티
+    const restored = tableChangedThisTurn();
+    if (restored) restoreTable();
     endTurn('timeout', pen);
-    toast(`⏰ ${p.name} 시간 초과! 패널티 ${pen}장`);
+    toast(`⏰ ${p.name} 시간 초과! 패널티 ${pen}장` + (restored ? ' · 테이블 되돌림' : ''));
   };
 
   $('#hourglassWrap').addEventListener('click', () => {
@@ -330,6 +335,11 @@
     }
     g.log.push({ round: g.round, turn: g.turnNo, pid, action, tiles, elapsed, hand: g.hands[pid], at: Date.now() });
 
+    // 턴이 끝나면 지금 테이블이 다음 턴의 기준(되돌리기 지점)이 됨
+    ensureTable(g);
+    g.tableAtTurnStart = clone(g.table);
+    resetTableUi();
+
     if (action === 'place' && g.hands[pid] === 0) {
       g.running = false; cancelAnimationFrame(rafId); keepAwake(false);
       save(); render();
@@ -352,12 +362,29 @@
     const prev = JSON.parse(g.history.pop());
     const log = g.log.slice(0, prev.logLen); delete prev.logLen;
     Object.assign(g, prev, { log, history: g.history, running: false, remaining: state.settings.turnSeconds, turnStartedAt: null });
+    resetTableUi();
     cancelAnimationFrame(rafId); keepAwake(false);
     save(); render(); toast('이전 턴으로 되돌렸어요');
   };
 
-  $('#drawBtn').addEventListener('click', () => endTurn('draw', 1));
-  $('#placeBtn').addEventListener('click', () => endTurn('place', state.placeCount));
+  // 드로우: 이번 턴에 테이블을 건드렸다면 턴 시작 상태로 되돌린 뒤 드로우
+  const drawAction = () => {
+    if (tableChangedThisTurn()) {
+      if (!confirm('이번 턴에 테이블이 바뀌었어요.\n턴 시작 상태로 되돌리고 드로우할까요?')) return;
+      restoreTable();
+    }
+    endTurn('draw', 1);
+  };
+  // 내려놓기: 테이블에 잘못된 세트가 있으면 한 번 더 확인
+  const placeAction = () => {
+    const g = state.game; if (!g) return;
+    ensureTable(g);
+    const bad = g.table.map((s, i) => [i + 1, classify(s)]).filter(([, c]) => !c.ok);
+    if (bad.length && !confirm(`세트 ${bad.map(([i]) => i).join(', ')}이(가) 올바르지 않아요.\n그래도 턴을 끝낼까요?`)) return;
+    endTurn('place', state.placeCount);
+  };
+  $('#drawBtn').addEventListener('click', drawAction);
+  $('#placeBtn').addEventListener('click', placeAction);
   $('#placeMinus').addEventListener('click', () => { state.placeCount = Math.max(1, state.placeCount - 1); save(); renderGame(); });
   $('#placePlus').addEventListener('click', () => { state.placeCount = Math.min(30, state.placeCount + 1); save(); renderGame(); });
   $('#undoBtn').addEventListener('click', undo);
@@ -403,8 +430,234 @@
           )),
       ));
     });
+    renderTable();
     drawHourglass();
   };
+
+  // =========================================================
+  // 테이블 기록 (내려놓은 큐브 체크)
+  // =========================================================
+  const TILE_COLORS = [
+    { c: 'r', name: '빨강', hex: '#d23b3b' },
+    { c: 'b', name: '파랑', hex: '#2f5fa8' },
+    { c: 'y', name: '주황', hex: '#e08a00' },
+    { c: 'k', name: '검정', hex: '#222222' },
+  ];
+  const TILE_HEX = Object.fromEntries(TILE_COLORS.map((t) => [t.c, t.hex]));
+  const TILE_NAME = Object.fromEntries(TILE_COLORS.map((t) => [t.c, t.name]));
+  const COLOR_ORDER = { r: 0, b: 1, y: 2, k: 3 };
+  const isJoker = (t) => t.c === 'j';
+  const tileKey = (t) => (isJoker(t) ? 'j' : t.c + t.n);
+  const countTiles = (sets) => sets.reduce((a, s) => a + s.length, 0);
+  const clone = (v) => JSON.parse(JSON.stringify(v));
+
+  let tableSel = [];     // 선택한 큐브 [{ s: 세트 번호, i: 큐브 번호 }]
+  let activeSet = -1;    // 큐브를 추가할 세트 (-1 = 새 세트)
+  let pickerOpen = false;
+  let prevOpen = false;
+
+  const ensureTable = (g) => { g.table ||= []; g.tableAtTurnStart ||= []; };
+  const resetTableUi = () => { tableSel = []; activeSet = -1; pickerOpen = false; prevOpen = false; };
+  const tableChangedThisTurn = () => {
+    const g = state.game; if (!g) return false;
+    ensureTable(g);
+    return JSON.stringify(g.table) !== JSON.stringify(g.tableAtTurnStart);
+  };
+  const restoreTable = () => {
+    const g = state.game;
+    g.table = clone(g.tableAtTurnStart);
+    resetTableUi();
+  };
+
+  // 세트 검사: 그룹(같은 숫자·다른 색 3~4장) 또는 런(같은 색 연속 숫자 3장 이상), 조커는 아무 큐브나 대신함
+  const classify = (set) => {
+    if (set.length < 3) return { ok: false, label: '3장 이상 필요' };
+    const real = set.filter((t) => !isJoker(t));
+    const jokers = set.length - real.length;
+    if (!real.length) return { ok: true, label: '조커' };
+    if (real.every((t) => t.n === real[0].n)) {
+      if (new Set(real.map((t) => t.c)).size === real.length && set.length <= 4) return { ok: true, label: '그룹' };
+      if (!real.every((t) => t.c === real[0].c)) return { ok: false, label: set.length > 4 ? '그룹은 4장까지' : '같은 색 중복' };
+    }
+    if (real.every((t) => t.c === real[0].c)) {
+      const ns = real.map((t) => t.n).sort((a, b) => a - b);
+      if (new Set(ns).size !== ns.length) return { ok: false, label: '같은 숫자 중복' };
+      const gaps = ns[ns.length - 1] - ns[0] + 1 - ns.length;
+      if (gaps <= jokers && set.length <= 13) return { ok: true, label: '런' };
+      return { ok: false, label: '숫자가 이어지지 않음' };
+    }
+    return { ok: false, label: '색·숫자 조합 오류' };
+  };
+
+  // 보기 좋게 정렬: 런은 숫자순(빈칸에 조커), 그룹은 색 순서
+  const sortSet = (set) => {
+    const real = set.filter((t) => !isJoker(t));
+    const jokers = set.filter(isJoker);
+    const isRun = real.length > 1 && real.every((t) => t.c === real[0].c) && new Set(real.map((t) => t.n)).size === real.length;
+    if (!isRun) {
+      real.sort((a, b) => a.n - b.n || COLOR_ORDER[a.c] - COLOR_ORDER[b.c]);
+      return [...real, ...jokers];
+    }
+    real.sort((a, b) => a.n - b.n);
+    const out = [];
+    real.forEach((t, k) => {
+      if (k > 0) for (let n = real[k - 1].n + 1; n < t.n && jokers.length; n++) out.push(jokers.pop());
+      out.push(t);
+    });
+    let hi = real[real.length - 1].n;
+    while (jokers.length) { if (hi < 13) { out.push(jokers.pop()); hi++; } else out.unshift(jokers.pop()); }
+    return out;
+  };
+
+  const tileEl = (t, { selected = false, disabled = false, onclick } = {}) => el(onclick ? 'button' : 'span', {
+    class: 'tile' + (isJoker(t) ? ' joker' : '') + (selected ? ' sel' : ''),
+    style: isJoker(t) ? '' : `--tc:${TILE_HEX[t.c]}`,
+    textContent: isJoker(t) ? '☺' : t.n,
+    title: isJoker(t) ? '조커' : `${TILE_NAME[t.c]} ${t.n}`,
+    'aria-label': isJoker(t) ? '조커' : `${TILE_NAME[t.c]} ${t.n}`,
+    disabled, onclick,
+  });
+
+  // 테이블이 바뀔 때마다: 빈 세트 정리, 저장, '내려놓기 장수'를 이번 턴에 늘어난 수로 맞춤
+  const tableChanged = () => {
+    const g = state.game;
+    const activeRef = g.table[activeSet];
+    g.table = g.table.filter((s) => s.length);
+    activeSet = activeRef && activeRef.length ? g.table.indexOf(activeRef) : -1;
+    const diff = countTiles(g.table) - countTiles(g.tableAtTurnStart);
+    if (diff > 0) state.placeCount = diff;
+    save(); renderGame();
+  };
+
+  const addTile = (t) => {
+    const g = state.game;
+    if (activeSet < 0 || !g.table[activeSet]) { g.table.push([]); activeSet = g.table.length - 1; }
+    g.table[activeSet] = sortSet([...g.table[activeSet], { ...t }]);
+    tableChanged();
+  };
+
+  const takeSelected = () => {
+    const g = state.game;
+    const picked = [...tableSel].sort((a, b) => b.s - a.s || b.i - a.i);
+    const tiles = picked.map(({ s, i }) => g.table[s].splice(i, 1)[0]).reverse();
+    tableSel = [];
+    return tiles;
+  };
+
+  const moveSelectedTo = (target) => {
+    const g = state.game;
+    const targetRef = target >= 0 ? g.table[target] : null;
+    const tiles = takeSelected();
+    if (targetRef) {
+      const idx = g.table.indexOf(targetRef);
+      g.table[idx] = sortSet([...targetRef, ...tiles]);
+      activeSet = idx;
+    } else {
+      g.table.push(sortSet(tiles));
+      activeSet = g.table.length - 1;
+    }
+    tableChanged();
+  };
+
+  const onTileTap = (s, i) => {
+    const k = tableSel.findIndex((x) => x.s === s && x.i === i);
+    if (k >= 0) tableSel.splice(k, 1); else tableSel.push({ s, i });
+    renderTable();
+  };
+  const onSetTap = (s) => {
+    if (tableSel.length) {
+      // 선택한 큐브가 모두 이 세트 안에 있으면 이동하지 않음
+      if (tableSel.every((x) => x.s === s)) return;
+      moveSelectedTo(s);
+    } else if (pickerOpen) { activeSet = s; renderTable(); }
+  };
+
+  const renderSets = (box, sets, interactive) => {
+    box.replaceChildren();
+    if (!sets.length) {
+      box.append(el('p', { class: 'hint', textContent: interactive ? '아직 기록된 큐브가 없어요. ＋ 큐브 추가를 눌러 내려놓은 큐브를 체크하세요.' : '비어 있음' }));
+      return;
+    }
+    sets.forEach((set, si) => {
+      const c = classify(set);
+      const tiles = el('div', { class: 'tiles' });
+      set.forEach((t, i) => tiles.append(tileEl(t, interactive ? {
+        selected: tableSel.some((x) => x.s === si && x.i === i),
+        onclick: (e) => { e.stopPropagation(); onTileTap(si, i); },
+      } : {})));
+      box.append(el('div', {
+        class: 'set' + (interactive && pickerOpen && si === activeSet ? ' active' : '') + (c.ok ? '' : ' invalid') + (interactive && tableSel.length ? ' droppable' : ''),
+        onclick: interactive ? () => onSetTap(si) : null,
+      },
+      el('span', { class: 'set-no', textContent: si + 1 }),
+      tiles,
+      el('span', { class: 'set-state', textContent: c.ok ? `✔ ${c.label}` : `⚠ ${c.label}` })));
+    });
+  };
+
+  const renderPicker = () => {
+    const g = state.game;
+    const used = {};
+    g.table.flat().forEach((t) => { used[tileKey(t)] = (used[tileKey(t)] || 0) + 1; });
+    $('#pickerTarget').textContent = activeSet >= 0 && g.table[activeSet] ? `세트 ${activeSet + 1}에 추가 중` : '새 세트에 추가 중';
+    $('#newSetBtn').disabled = activeSet < 0;
+    const grid = $('#pickerGrid');
+    grid.replaceChildren();
+    TILE_COLORS.forEach((col) => {
+      const row = el('div', { class: 'pick-row' });
+      for (let n = 1; n <= 13; n++) {
+        const t = { c: col.c, n };
+        row.append(tileEl(t, { disabled: (used[tileKey(t)] || 0) >= 2, onclick: () => addTile(t) }));
+      }
+      grid.append(row);
+    });
+    grid.append(el('div', { class: 'pick-joker' },
+      tileEl({ c: 'j', n: 0 }, { disabled: (used.j || 0) >= 2, onclick: () => addTile({ c: 'j', n: 0 }) }),
+      el('span', { class: 'hint', textContent: '조커' })));
+  };
+
+  const renderTable = () => {
+    const g = state.game; if (!g) return;
+    ensureTable(g);
+    const total = countTiles(g.table);
+    const diff = total - countTiles(g.tableAtTurnStart);
+    $('#tableSummary').textContent = `(세트 ${g.table.length} · ${total}장${diff ? ` · 이번 턴 ${diff > 0 ? '+' : ''}${diff}` : ''})`;
+    renderSets($('#tableSets'), g.table, true);
+
+    $('#selBar').hidden = !tableSel.length;
+    $('#selCount').textContent = tableSel.length;
+
+    $('#picker').hidden = !pickerOpen;
+    if (pickerOpen) renderPicker();
+    $('#addTilesBtn').textContent = pickerOpen ? '✓ 추가 완료' : '＋ 큐브 추가';
+
+    const changed = tableChangedThisTurn();
+    $('#revertTableBtn').disabled = !changed;
+    $('#prevTableBtn').disabled = !changed && !prevOpen;
+    $('#prevTable').hidden = !prevOpen;
+    if (prevOpen) {
+      $('#prevTable').replaceChildren(el('h4', { textContent: `턴 시작 때 테이블 (${countTiles(g.tableAtTurnStart)}장)` }));
+      const box = el('div', { class: 'table-sets' });
+      renderSets(box, g.tableAtTurnStart, false);
+      $('#prevTable').append(box);
+    }
+    $('#prevTableBtn').textContent = prevOpen ? '👁 닫기' : '👁 턴 시작 테이블';
+  };
+
+  $('#addTilesBtn').addEventListener('click', () => {
+    pickerOpen = !pickerOpen;
+    if (pickerOpen) { tableSel = []; activeSet = -1; }
+    renderTable();
+  });
+  $('#newSetBtn').addEventListener('click', () => { activeSet = -1; renderTable(); });
+  $('#selNewSet').addEventListener('click', () => moveSelectedTo(-1));
+  $('#selRemove').addEventListener('click', () => { takeSelected(); tableChanged(); });
+  $('#selCancel').addEventListener('click', () => { tableSel = []; renderTable(); });
+  $('#revertTableBtn').addEventListener('click', () => {
+    if (!confirm('테이블을 이번 턴 시작 상태로 되돌릴까요?')) return;
+    restoreTable(); save(); renderGame(); toast('테이블을 턴 시작 상태로 되돌렸어요');
+  });
+  $('#prevTableBtn').addEventListener('click', () => { prevOpen = !prevOpen; renderTable(); });
 
   // =========================================================
   // 3. 턴 기록
@@ -565,8 +818,8 @@
   document.addEventListener('keydown', (e) => {
     if (state.view !== 'game' || !state.game || e.target.tagName === 'INPUT') return;
     if (e.code === 'Space') { e.preventDefault(); state.game.running ? pauseTimer() : startTimer(); }
-    else if (e.key === 'd' || e.key === 'D') endTurn('draw', 1);
-    else if (e.key === 'p' || e.key === 'P') endTurn('place', state.placeCount);
+    else if (e.key === 'd' || e.key === 'D') drawAction();
+    else if (e.key === 'p' || e.key === 'P') placeAction();
   });
 
   // ---------- 렌더 ----------
