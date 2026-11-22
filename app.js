@@ -25,7 +25,7 @@
   // ---------- 상태 ----------
   const defaultState = () => ({
     view: 'setup',
-    settings: { turnSeconds: 60, warnSeconds: 10, penaltyDraw: 3, startHand: 14, autoStart: true, sound: true, vibrate: true },
+    settings: { turnSeconds: 60, warnSeconds: 10, penaltyDraw: 3, startHand: 14, autoStart: true, sound: true, vibrate: true, tableMode: 'manual', autoCapture: true },
     players: [
       { id: uid(), name: DEFAULT_NAMES[0], color: COLORS[0] },
       { id: uid(), name: DEFAULT_NAMES[1], color: COLORS[1] },
@@ -41,6 +41,8 @@
   try {
     state = Object.assign(defaultState(), JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') || {});
   } catch { state = defaultState(); }
+  // 새 버전에서 추가된 설정값도 채워 넣음
+  state.settings = { ...defaultState().settings, ...state.settings };
   // 새로고침 후에는 항상 일시정지 상태로 복원
   if (state.game && state.game.running) {
     state.game.remaining = Math.max(0, (state.game.endsAt - Date.now()) / 1000);
@@ -90,6 +92,7 @@
 
   // ---------- 탭 이동 ----------
   const show = (view) => {
+    if (view !== 'game') stopCam();
     state.view = view; save();
     document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${view}`));
     document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
@@ -129,6 +132,7 @@
     for (const k of ['turnSeconds', 'warnSeconds', 'penaltyDraw', 'startHand']) $('#' + k).value = s[k];
     for (const k of ['autoStart', 'sound', 'vibrate']) $('#' + k).checked = s[k];
     document.querySelectorAll('#timeChips button').forEach((b) => b.classList.toggle('on', +b.dataset.sec === s.turnSeconds));
+    document.querySelectorAll('#tableModeChips button').forEach((b) => b.classList.toggle('on', b.dataset.mode === (s.tableMode || 'manual')));
     $('#startGameBtn').textContent = state.game ? '진행 중인 게임으로 ▶' : '게임 시작 ▶';
   };
 
@@ -193,6 +197,7 @@
     const hands = {}, melded = {};
     state.players.forEach((p) => { hands[p.id] = state.settings.startHand; melded[p.id] = false; });
     const prevLog = state.game?.log || [];
+    clearPhotos(); // 새 라운드는 빈 테이블에서 시작하므로 지난 사진 정리
     const roundNo = state.rounds.length + 1;
     // 라운드마다 선 플레이어를 한 칸씩 돌림
     const startIdx = (roundNo - 1) % state.players.length;
@@ -335,6 +340,11 @@
     }
     g.log.push({ round: g.round, turn: g.turnNo, pid, action, tiles, elapsed, hand: g.hands[pid], at: Date.now() });
 
+    // 촬영 모드: 내려놓고 턴을 끝낼 때 테이블을 자동으로 찍어 다음 턴의 기준 사진으로 남김
+    if (action === 'place' && state.settings.tableMode === 'photo' && state.settings.autoCapture && camReady()) {
+      captureFromCamera({ round: g.round, turn: g.turnNo, pid, kind: 'auto' });
+    }
+
     // 턴이 끝나면 지금 테이블이 다음 턴의 기준(되돌리기 지점)이 됨
     ensureTable(g);
     g.tableAtTurnStart = clone(g.table);
@@ -430,7 +440,7 @@
           )),
       ));
     });
-    renderTable();
+    renderTableMode();
     drawHourglass();
   };
 
@@ -660,6 +670,219 @@
   $('#prevTableBtn').addEventListener('click', () => { prevOpen = !prevOpen; renderTable(); });
 
   // =========================================================
+  // 테이블 촬영 모드 (사진으로 테이블 기록)
+  // =========================================================
+  // 사진은 용량이 커서 localStorage 대신 IndexedDB에 Blob으로 저장
+  const photoDb = (() => {
+    let dbp;
+    const open = () => (dbp ||= new Promise((res, rej) => {
+      const r = indexedDB.open('rummikub-photos', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('photos');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    }));
+    const tx = (mode, fn) => open().then((db) => new Promise((res, rej) => {
+      const t = db.transaction('photos', mode);
+      const req = fn(t.objectStore('photos'));
+      t.oncomplete = () => res(req && req.result);
+      t.onerror = () => rej(t.error);
+    }));
+    return {
+      put: (k, v) => tx('readwrite', (st) => st.put(v, k)),
+      get: (k) => tx('readonly', (st) => st.get(k)),
+      del: (k) => tx('readwrite', (st) => st.delete(k)),
+      clear: () => tx('readwrite', (st) => st.clear()),
+    };
+  })();
+  const MAX_PHOTOS = 40;
+  const photoUrls = new Map(); // id -> objectURL
+  let camStream = null;
+  let viewerIdx = -1;
+  let camError = '';
+
+  const camReady = () => !!camStream && $('#camVideo').videoWidth > 0;
+
+  const startCam = async () => {
+    if (camStream) return;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      camError = '이 브라우저는 실시간 카메라를 지원하지 않아요. ‘카메라 앱으로 찍기’를 써 주세요.';
+      renderPhotoPane(); return;
+    }
+    try {
+      camStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false,
+      });
+      const v = $('#camVideo');
+      v.srcObject = camStream;
+      await v.play().catch(() => {});
+      camError = '';
+      renderPhotoPane();
+    } catch (err) {
+      camStream = null;
+      camError = err && err.name === 'NotAllowedError'
+        ? '카메라 권한이 거부됐어요. 브라우저 설정에서 카메라를 허용해 주세요.'
+        : '카메라를 켤 수 없어요. ‘카메라 앱으로 찍기’를 써 주세요.';
+      renderPhotoPane();
+    }
+  };
+  const stopCam = () => {
+    if (!camStream) return;
+    camStream.getTracks().forEach((t) => t.stop());
+    camStream = null;
+    const v = $('#camVideo'); if (v) v.srcObject = null;
+    if (state.view === 'game') renderPhotoPane();
+  };
+
+  // 큰 사진은 긴 변 1280px로 줄여 JPEG로 저장 (사진 1장 약 100~250KB)
+  const toJpeg = (source, w, h) => new Promise((res) => {
+    const scale = Math.min(1, 1280 / Math.max(w, h));
+    const c = document.createElement('canvas');
+    c.width = Math.round(w * scale); c.height = Math.round(h * scale);
+    c.getContext('2d').drawImage(source, 0, 0, c.width, c.height);
+    c.toBlob((b) => res(b), 'image/jpeg', 0.72);
+  });
+
+  const addPhoto = async (blob, meta) => {
+    const g = state.game; if (!g || !blob) return;
+    const id = uid();
+    try { await photoDb.put(id, blob); } catch { toast('사진을 저장하지 못했어요 (저장 공간 부족?)'); return; }
+    photoUrls.set(id, URL.createObjectURL(blob));
+    g.photos ||= [];
+    g.photos.push({ id, at: Date.now(), ...meta });
+    while (g.photos.length > MAX_PHOTOS) {
+      const old = g.photos.shift();
+      photoDb.del(old.id).catch(() => {});
+      if (photoUrls.has(old.id)) { URL.revokeObjectURL(photoUrls.get(old.id)); photoUrls.delete(old.id); }
+    }
+    save();
+    if (state.view === 'game') renderPhotoPane();
+  };
+
+  const captureFromCamera = (meta) => {
+    const v = $('#camVideo');
+    if (!camReady()) return;
+    // 화면을 바로 그려 두고(동기), 압축/저장은 뒤에서 처리
+    const flash = $('#tableCard .cam-box');
+    flash.classList.add('flash'); setTimeout(() => flash.classList.remove('flash'), 250);
+    toJpeg(v, v.videoWidth, v.videoHeight).then((blob) => addPhoto(blob, meta));
+  };
+
+  const currentMeta = (kind) => {
+    const g = state.game;
+    return { round: g.round, turn: g.turnNo, pid: g.order[g.current], kind };
+  };
+
+  const clearPhotos = () => {
+    photoUrls.forEach((u) => URL.revokeObjectURL(u));
+    photoUrls.clear();
+    photoDb.clear().catch(() => {});
+  };
+
+  const photoUrl = async (id) => {
+    if (photoUrls.has(id)) return photoUrls.get(id);
+    try {
+      const blob = await photoDb.get(id);
+      if (!blob) return null;
+      const u = URL.createObjectURL(blob); photoUrls.set(id, u); return u;
+    } catch { return null; }
+  };
+
+  const photoCaption = (ph) => {
+    const t = new Date(ph.at);
+    const hm = `${t.getHours()}:${String(t.getMinutes()).padStart(2, '0')}`;
+    const what = ph.kind === 'auto' ? '내려놓은 뒤' : '촬영';
+    return `턴 ${ph.turn} · ${player(ph.pid).name} ${what} · ${hm}`;
+  };
+
+  const roundPhotos = () => {
+    const g = state.game;
+    return (g?.photos || []).filter((ph) => ph.round === g.round);
+  };
+
+  const renderPhotoPane = async () => {
+    const g = state.game; if (!g) return;
+    const on = !!camStream;
+    $('#camOff').hidden = on;
+    $('#camVideo').hidden = !on;
+    $('#camMsg').textContent = camError || '카메라가 꺼져 있어요';
+    $('#snapBtn').disabled = !on;
+    $('#camStopBtn').hidden = !on;
+    $('#autoCapture').checked = state.settings.autoCapture;
+
+    const list = roundPhotos();
+    const last = list[list.length - 1];
+    const lastBox = $('#lastPhoto');
+    if (!last) {
+      lastBox.replaceChildren(el('p', { class: 'hint', textContent: '아직 사진이 없어요. 첫 내려놓기 후 자동으로 찍히거나, ‘지금 촬영’을 누르세요.' }));
+    } else {
+      const u = await photoUrl(last.id);
+      lastBox.replaceChildren(
+        u ? el('img', { src: u, alt: '턴 시작 때 테이블', onclick: () => openViewer(list.length - 1) }) : el('p', { class: 'hint', textContent: '사진을 불러오지 못했어요' }),
+        el('div', { class: 'photo-cap', textContent: photoCaption(last) }));
+    }
+
+    const strip = $('#photoStrip');
+    strip.replaceChildren();
+    if (!list.length) { strip.append(el('p', { class: 'hint', textContent: '없음' })); return; }
+    for (let i = list.length - 1; i >= 0; i--) {
+      const ph = list[i];
+      const u = await photoUrl(ph.id);
+      strip.append(el('button', { class: 'thumb', onclick: () => openViewer(i), title: photoCaption(ph) },
+        u ? el('img', { src: u, alt: photoCaption(ph) }) : '?',
+        el('span', { textContent: `턴 ${ph.turn}` })));
+    }
+  };
+
+  const openViewer = async (i) => {
+    const list = roundPhotos();
+    if (!list[i]) return;
+    viewerIdx = i;
+    $('#viewerImg').src = (await photoUrl(list[i].id)) || '';
+    $('#viewerCap').textContent = `${photoCaption(list[i])} (${i + 1}/${list.length})`;
+    $('#viewerPrev').disabled = i <= 0;
+    $('#viewerNext').disabled = i >= list.length - 1;
+    $('#photoViewer').hidden = false;
+  };
+  $('#viewerPrev').addEventListener('click', (e) => { e.stopPropagation(); openViewer(viewerIdx - 1); });
+  $('#viewerNext').addEventListener('click', (e) => { e.stopPropagation(); openViewer(viewerIdx + 1); });
+  $('#viewerClose').addEventListener('click', () => { $('#photoViewer').hidden = true; });
+  $('#photoViewer').addEventListener('click', (e) => { if (e.target.id === 'photoViewer' || e.target.id === 'viewerImg') $('#photoViewer').hidden = true; });
+
+  $('#camStartBtn').addEventListener('click', startCam);
+  $('#camStopBtn').addEventListener('click', stopCam);
+  $('#snapBtn').addEventListener('click', () => captureFromCamera(currentMeta('manual')));
+  $('#autoCapture').addEventListener('change', (e) => { state.settings.autoCapture = e.target.checked; save(); });
+  $('#photoFile').addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file || !state.game) return;
+    try {
+      const bmp = await createImageBitmap(file);
+      const blob = await toJpeg(bmp, bmp.width, bmp.height);
+      await addPhoto(blob, currentMeta('manual'));
+      toast('사진을 저장했어요');
+    } catch { toast('사진을 불러오지 못했어요'); }
+  });
+
+  // 수동 / 촬영 모드 전환
+  const setTableMode = (mode) => {
+    state.settings.tableMode = mode;
+    if (mode !== 'photo') stopCam();
+    save(); render();
+  };
+  document.querySelectorAll('#gameModeToggle button, #tableModeChips button').forEach((b) =>
+    b.addEventListener('click', () => setTableMode(b.dataset.mode)));
+
+  const renderTableMode = () => {
+    const mode = state.settings.tableMode === 'photo' ? 'photo' : 'manual';
+    document.querySelectorAll('#gameModeToggle button').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
+    $('#manualPane').hidden = mode !== 'manual';
+    $('#photoPane').hidden = mode !== 'photo';
+    $('#tableSummary').hidden = mode !== 'manual';
+    if (mode === 'manual') renderTable(); else renderPhotoPane();
+  };
+
+  // =========================================================
   // 3. 턴 기록
   // =========================================================
   const ACTION_LABEL = { draw: '드로우', place: '내려놓음', timeout: '시간 초과' };
@@ -795,6 +1018,7 @@
     if (!confirm('모든 턴 기록과 점수를 지우고 새 게임을 시작할까요? (플레이어 설정은 유지)')) return;
     cancelAnimationFrame(rafId); keepAwake(false);
     state.game = null; state.rounds = []; entry = null;
+    clearPhotos();
     save(); show('setup');
   });
 
